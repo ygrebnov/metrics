@@ -26,6 +26,12 @@ func NewBasicProvider() *BasicProvider {
 	}
 }
 
+const (
+	InstrumentTypeCounter   = "counter"
+	InstrumentTypeUpDown    = "updown"
+	InstrumentTypeHistogram = "histogram"
+)
+
 // keyMu returns a per-key mutex for the given key, creating one if necessary.
 // The returned mutex is owned by the provider and should be locked/unlocked by callers.
 func (p *BasicProvider) keyMu(key string) *sync.Mutex {
@@ -33,10 +39,11 @@ func (p *BasicProvider) keyMu(key string) *sync.Mutex {
 	return m.(*sync.Mutex)
 }
 
-// metaLoad returns the stored InstrumentConfig for name, if any.
-// It is a small helper to replace direct map access; tests use this for assertions.
-func (p *BasicProvider) metaLoad(name string) (InstrumentConfig, bool) {
-	v, ok := p.meta.Load(name)
+// metaLoad returns the stored InstrumentConfig for given instrument kind and name, if any.
+// key is composed as typ+":"+name.
+func (p *BasicProvider) metaLoad(typ, name string) (InstrumentConfig, bool) {
+	key := typ + ":" + name
+	v, ok := p.meta.Load(key)
 	if !ok {
 		return InstrumentConfig{}, false
 	}
@@ -57,7 +64,9 @@ func applyOptions(opts []InstrumentOption) InstrumentConfig {
 
 // Counter returns a monotonic counter instrument for the given name (created once).
 func (p *BasicProvider) Counter(name string, opts ...InstrumentOption) Counter {
-	v := p.getOrCreate("counter", name, opts,
+	v := p.getOrCreate(
+		InstrumentTypeCounter+":"+name,
+		opts,
 		func() (interface{}, bool) {
 			if vv, ok := p.counters.Load(name); ok {
 				return vv.(*BasicCounter), true
@@ -71,7 +80,9 @@ func (p *BasicProvider) Counter(name string, opts ...InstrumentOption) Counter {
 
 // UpDownCounter returns an up/down counter instrument for the given name (created once).
 func (p *BasicProvider) UpDownCounter(name string, opts ...InstrumentOption) UpDownCounter {
-	v := p.getOrCreate("updown", name, opts,
+	v := p.getOrCreate(
+		InstrumentTypeUpDown+":"+name,
+		opts,
 		func() (interface{}, bool) {
 			if vv, ok := p.updowns.Load(name); ok {
 				return vv.(*BasicUpDownCounter), true
@@ -85,7 +96,9 @@ func (p *BasicProvider) UpDownCounter(name string, opts ...InstrumentOption) UpD
 
 // Histogram returns a histogram instrument for the given name (created once).
 func (p *BasicProvider) Histogram(name string, opts ...InstrumentOption) Histogram {
-	v := p.getOrCreate("histogram", name, opts,
+	v := p.getOrCreate(
+		InstrumentTypeHistogram+":"+name,
+		opts,
 		func() (interface{}, bool) {
 			if vv, ok := p.histograms.Load(name); ok {
 				return vv.(*BasicHistogram), true
@@ -110,7 +123,7 @@ func (p *BasicProvider) Histogram(name string, opts ...InstrumentOption) Histogr
 //   - create is called under write lock to construct and store a new instance; it
 //     must assign the created instance into the appropriate provider map and return it.
 func (p *BasicProvider) getOrCreate(
-	typ, name string,
+	key string,
 	opts []InstrumentOption,
 	check func() (interface{}, bool),
 	create func() interface{},
@@ -123,7 +136,6 @@ func (p *BasicProvider) getOrCreate(
 	// compute config off-lock to avoid holding per-key mutex during option application
 	cfg := applyOptions(opts)
 
-	key := typ + ":" + name
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
@@ -132,8 +144,8 @@ func (p *BasicProvider) getOrCreate(
 	if v, ok := check(); ok {
 		return v
 	}
-	// store metadata computed earlier using a per-kind:name key if desired
-	p.meta.Store(name, cfg)
+	// store metadata computed earlier using the compound key typ:name
+	p.meta.Store(key, cfg)
 	inst := create()
 	return inst
 }

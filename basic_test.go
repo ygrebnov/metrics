@@ -206,7 +206,7 @@ func TestBasicProvider_FetchAndMetaPreserved(t *testing.T) {
 	if reflect.ValueOf(c1).Pointer() != reflect.ValueOf(c2).Pointer() {
 		t.Fatalf("expected same counter instance when fetching twice")
 	}
-	cfg, _ := p.metaLoad("fetch_cnt")
+	cfg, _ := p.metaLoad("counter", "fetch_cnt")
 	if cfg.Description != "first-desc" {
 		t.Fatalf("expected description preserved, got %q", cfg.Description)
 	}
@@ -217,7 +217,7 @@ func TestBasicProvider_FetchAndMetaPreserved(t *testing.T) {
 	if reflect.ValueOf(u1).Pointer() != reflect.ValueOf(u2).Pointer() {
 		t.Fatalf("expected same updown instance when fetching twice")
 	}
-	cfg, _ = p.metaLoad("fetch_udc")
+	cfg, _ = p.metaLoad("updown", "fetch_udc")
 	if cfg.Description != udFirst {
 		t.Fatalf("expected updown description preserved, got %q", cfg.Description)
 	}
@@ -228,7 +228,7 @@ func TestBasicProvider_FetchAndMetaPreserved(t *testing.T) {
 	if reflect.ValueOf(h1).Pointer() != reflect.ValueOf(h2).Pointer() {
 		t.Fatalf("expected same histogram instance when fetching twice")
 	}
-	cfg, _ = p.metaLoad("fetch_hist")
+	cfg, _ = p.metaLoad("histogram", "fetch_hist")
 	if cfg.Description != hFirst {
 		t.Fatalf("expected histogram description preserved, got %q", cfg.Description)
 	}

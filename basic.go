@@ -11,6 +11,7 @@ import (
 // Instruments are created on demand by name and reused for the same name.
 // Instrument options are currently advisory and stored for potential introspection.
 type BasicProvider struct {
+	cfg        *basicProviderConfig
 	counters   sync.Map // map[string]*BasicCounter
 	updowns    sync.Map // map[string]*BasicUpDownCounter
 	histograms sync.Map // map[string]*BasicHistogram
@@ -19,36 +20,40 @@ type BasicProvider struct {
 	inits sync.Map // map[string]*sync.Mutex
 }
 
-// NewBasicProvider constructs a new BasicProvider.
-func NewBasicProvider() *BasicProvider {
-	return &BasicProvider{
-		// counters/updowns/histograms/meta/inits are zero-value ready for use
-	}
+type basicProviderConfig struct {
+	// when false, remove per-key mutex entries from `inits` after initialization to
+	// allow GC of mutexes for many ephemeral instrument names. Default: false.
+	doNotCleanupInits bool
 }
 
-const (
-	InstrumentTypeCounter   = "counter"
-	InstrumentTypeUpDown    = "updown"
-	InstrumentTypeHistogram = "histogram"
-)
+// BasicProviderOption configures a BasicProvider constructed by NewBasicProvider.
+type BasicProviderOption func(*basicProviderConfig)
+
+// WithInitCleanupDisabled controls whether per-key init mutex entries are removed from
+// the provider's internal `inits` map after initialization. When enabled the
+// entries are deleted to allow GC of mutexes for ephemeral instrument names.
+// Init cleanup is enabled by default; this option disables it.
+func WithInitCleanupDisabled() BasicProviderOption {
+	return func(cfg *basicProviderConfig) { cfg.doNotCleanupInits = true }
+}
+
+// NewBasicProvider constructs a new BasicProvider.
+// Accepts optional functional options to customize behavior.
+func NewBasicProvider(opts ...BasicProviderOption) *BasicProvider {
+	cfg := &basicProviderConfig{}
+	for _, o := range opts {
+		if o != nil {
+			o(cfg)
+		}
+	}
+	return &BasicProvider{cfg: cfg}
+}
 
 // keyMu returns a per-key mutex for the given key, creating one if necessary.
 // The returned mutex is owned by the provider and should be locked/unlocked by callers.
 func (p *BasicProvider) keyMu(key string) *sync.Mutex {
 	m, _ := p.inits.LoadOrStore(key, &sync.Mutex{})
 	return m.(*sync.Mutex)
-}
-
-// metaLoad returns the stored InstrumentConfig for given instrument kind and name, if any.
-// key is composed as typ+":"+name.
-func (p *BasicProvider) metaLoad(typ, name string) (InstrumentConfig, bool) {
-	key := typ + ":" + name
-	v, ok := p.meta.Load(key)
-	if !ok {
-		return InstrumentConfig{}, false
-	}
-	cfg, ok := v.(InstrumentConfig)
-	return cfg, ok
 }
 
 // applyOptions builds InstrumentConfig from options.
@@ -62,91 +67,91 @@ func applyOptions(opts []InstrumentOption) InstrumentConfig {
 	return cfg
 }
 
+// get retrieves an existing instrument by type and name.
+func (p *BasicProvider) get(t InstrumentType, name string) (interface{}, bool) {
+	switch t {
+	case InstrumentTypeCounter:
+		if v, ok := p.counters.Load(name); ok {
+			return v.(*BasicCounter), true
+		}
+	case InstrumentTypeUpDown:
+		if v, ok := p.updowns.Load(name); ok {
+			return v.(*BasicUpDownCounter), true
+		}
+	case InstrumentTypeHistogram:
+		if v, ok := p.histograms.Load(name); ok {
+			return v.(*BasicHistogram), true
+		}
+	}
+	return nil, false
+}
+
+// create constructs and stores a new instance into the appropriate sync.Map.
+func (p *BasicProvider) create(t InstrumentType, name string) interface{} {
+	switch t {
+	case InstrumentTypeCounter:
+		c := &BasicCounter{}
+		p.counters.Store(name, c)
+		return c
+	case InstrumentTypeUpDown:
+		u := &BasicUpDownCounter{}
+		p.updowns.Store(name, u)
+		return u
+	case InstrumentTypeHistogram:
+		h := &BasicHistogram{min: math.Inf(1), max: math.Inf(-1)}
+		p.histograms.Store(name, h)
+		return h
+	default:
+		return nil
+	}
+}
+
 // Counter returns a monotonic counter instrument for the given name (created once).
 func (p *BasicProvider) Counter(name string, opts ...InstrumentOption) Counter {
-	v := p.getOrCreate(
-		InstrumentTypeCounter+":"+name,
-		opts,
-		func() (interface{}, bool) {
-			if vv, ok := p.counters.Load(name); ok {
-				return vv.(*BasicCounter), true
-			}
-			return nil, false
-		},
-		func() interface{} { c := &BasicCounter{}; p.counters.Store(name, c); return c },
-	)
-	return v.(*BasicCounter)
+	return p.getOrCreate(InstrumentTypeCounter, name, opts).(*BasicCounter)
 }
 
 // UpDownCounter returns an up/down counter instrument for the given name (created once).
 func (p *BasicProvider) UpDownCounter(name string, opts ...InstrumentOption) UpDownCounter {
-	v := p.getOrCreate(
-		InstrumentTypeUpDown+":"+name,
-		opts,
-		func() (interface{}, bool) {
-			if vv, ok := p.updowns.Load(name); ok {
-				return vv.(*BasicUpDownCounter), true
-			}
-			return nil, false
-		},
-		func() interface{} { u := &BasicUpDownCounter{}; p.updowns.Store(name, u); return u },
-	)
-	return v.(*BasicUpDownCounter)
+	return p.getOrCreate(InstrumentTypeUpDown, name, opts).(*BasicUpDownCounter)
 }
 
 // Histogram returns a histogram instrument for the given name (created once).
 func (p *BasicProvider) Histogram(name string, opts ...InstrumentOption) Histogram {
-	v := p.getOrCreate(
-		InstrumentTypeHistogram+":"+name,
-		opts,
-		func() (interface{}, bool) {
-			if vv, ok := p.histograms.Load(name); ok {
-				return vv.(*BasicHistogram), true
-			}
-			return nil, false
-		},
-		func() interface{} {
-			h := &BasicHistogram{min: math.Inf(1), max: math.Inf(-1)}
-			p.histograms.Store(name, h)
-			return h
-		},
-	)
-	return v.(*BasicHistogram)
+	return p.getOrCreate(InstrumentTypeHistogram, name, opts).(*BasicHistogram)
 }
 
 // getOrCreate is a helper that implements a fast read path, computes options before
 // acquiring locks, and uses a per-key mutex to deduplicate concurrent initializations.
-//   - typ is a short prefix used as part of the key to avoid collisions between different instrument kinds.
-//   - name is the instrument name.
+//   - key is a compound "typ:name" key used for both the per-key mutex and meta storage.
 //   - opts are the instrument options (passed to applyOptions).
-//   - check is called under the appropriate lock to check for existing instance.
-//   - create is called under write lock to construct and store a new instance; it
-//     must assign the created instance into the appropriate provider map and return it.
-func (p *BasicProvider) getOrCreate(
-	key string,
-	opts []InstrumentOption,
-	check func() (interface{}, bool),
-	create func() interface{},
-) interface{} {
+func (p *BasicProvider) getOrCreate(t InstrumentType, name string, opts []InstrumentOption) interface{} {
 	// fast read path using sync.Map loads (safe without a global lock)
-	if v, ok := check(); ok {
+	if v, ok := p.get(t, name); ok {
 		return v
 	}
 
 	// compute config off-lock to avoid holding per-key mutex during option application
 	cfg := applyOptions(opts)
 
+	key := string(t) + ":" + name
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
 
 	// re-check after acquiring per-key mutex
-	if v, ok := check(); ok {
+	if v, ok := p.get(t, name); ok {
 		return v
 	}
 	// store metadata computed earlier using the compound key typ:name
 	p.meta.Store(key, cfg)
-	inst := create()
+	inst := p.create(t, name)
+	// optional cleanup: remove the per-key mutex from the inits map to allow GC of mutexes
+	// It's safe to delete while holding the mutex; existing goroutines that already
+	// hold the pointer will continue to use it, and new callers will get a new mutex.
+	if !p.cfg.doNotCleanupInits {
+		p.inits.Delete(key)
+	}
 	return inst
 }
 

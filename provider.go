@@ -3,13 +3,22 @@ package metrics
 // Provider constructs instruments used to record metrics.
 // Implementations must be safe for concurrent use.
 //
-// Keep this interface minimal and stable. If you need new capabilities later,
+// This interface is designed to be minimal and stable.
+// In case there is a need of new capabilities, we may later
 // introduce separate optional interfaces rather than expanding this surface.
 type Provider interface {
 	Counter(name string, opts ...InstrumentOption) Counter
 	UpDownCounter(name string, opts ...InstrumentOption) UpDownCounter
 	Histogram(name string, opts ...InstrumentOption) Histogram
 }
+
+type InstrumentType string
+
+const (
+	InstrumentTypeCounter   InstrumentType = "counter"
+	InstrumentTypeUpDown    InstrumentType = "updown"
+	InstrumentTypeHistogram InstrumentType = "histogram"
+)
 
 // Counter records monotonic counts.
 // Methods must be safe for concurrent use.
@@ -34,7 +43,7 @@ type InstrumentConfig struct {
 	Description string
 	Unit        string
 	// Attributes are static key-value pairs associated with the instrument itself.
-	// Keep cardinality bounded. Implementations may ignore attributes.
+	// Cardinality is bounded. Implementations may ignore attributes.
 	Attributes map[string]string
 }
 

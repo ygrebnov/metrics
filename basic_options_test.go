@@ -27,7 +27,7 @@ func TestBasicProvider_InstrumentsWithOptions(t *testing.T) {
 				if got := bc.Snapshot(); got != 5 {
 					t.Fatalf("unexpected counter value: got %d want %d", got, 5)
 				}
-				cfg, ok := p.metaLoad("counter", "cnt")
+				cfg, ok := metaLoad(p, "counter", "cnt")
 				if !ok {
 					t.Fatal("expected metadata for 'cnt' to be present")
 				}
@@ -62,7 +62,7 @@ func TestBasicProvider_InstrumentsWithOptions(t *testing.T) {
 				if got := bu.Snapshot(); got != 7 {
 					t.Fatalf("unexpected updown value: got %d want %d", got, 7)
 				}
-				cfg, ok := p.metaLoad("updown", "udc")
+				cfg, ok := metaLoad(p, "updown", "udc")
 				if !ok {
 					t.Fatal("expected metadata for 'udc' to be present")
 				}
@@ -104,7 +104,7 @@ func TestBasicProvider_InstrumentsWithOptions(t *testing.T) {
 				if s.Mean != 2.0 {
 					t.Fatalf("unexpected mean: got %v want %v", s.Mean, 2.0)
 				}
-				cfg, ok := p.metaLoad("histogram", "h")
+				cfg, ok := metaLoad(p, "histogram", "h")
 				if !ok {
 					t.Fatal("expected metadata for 'h' to be present")
 				}
@@ -136,7 +136,7 @@ func TestWithAttributesCopiesMap(t *testing.T) {
 	p.Counter("a", WithAttributes(attrs))
 	// mutate original
 	attrs["m"] = "mutated"
-	cfg, _ := p.metaLoad("counter", "a")
+	cfg, _ := metaLoad(p, "counter", "a")
 	if got := cfg.Attributes["m"]; got != "n" {
 		t.Fatalf("expected stored attribute to remain 'n', got %q", got)
 	}
@@ -146,19 +146,19 @@ func TestBasicProvider_OptionsAreOnlyAppliedOnFirstCreation(t *testing.T) {
 	p := NewBasicProvider()
 	p.Counter("dup", WithDescription("first"))
 	p.Counter("dup", WithDescription("second"))
-	cfg, _ := p.metaLoad("counter", "dup")
+	cfg, _ := metaLoad(p, "counter", "dup")
 	if cfg.Description != "first" {
 		t.Fatalf("expected first description to be kept, got %q", cfg.Description)
 	}
 	p.UpDownCounter("dupud", WithDescription("ud-first"))
 	p.UpDownCounter("dupud", WithDescription("ud-second"))
-	cfg, _ = p.metaLoad("updown", "dupud")
+	cfg, _ = metaLoad(p, "updown", "dupud")
 	if cfg.Description != "ud-first" {
 		t.Fatalf("expected first updown description to be kept, got %q", cfg.Description)
 	}
 	p.Histogram("duph", WithDescription("h-first"))
 	p.Histogram("duph", WithDescription("h-second"))
-	cfg, _ = p.metaLoad("histogram", "duph")
+	cfg, _ = metaLoad(p, "histogram", "duph")
 	if cfg.Description != "h-first" {
 		t.Fatalf("expected first histogram description to be kept, got %q", cfg.Description)
 	}

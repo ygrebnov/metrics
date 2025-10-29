@@ -184,6 +184,24 @@ func copyConfig(in InstrumentConfig) InstrumentConfig {
 	return out
 }
 
+func (p *BasicProvider) getInstrumentMeta(key InstrumentKey) (InstrumentConfig, bool) {
+	m, ok := p.meta.Load(key)
+	if !ok {
+		// invariant violation: instrument without meta
+		p.reportInvariantViolation(key.Type.String()+"_meta_missing", key)
+		return InstrumentConfig{}, false
+	}
+
+	c, ok2 := m.(InstrumentConfig)
+	if !ok2 {
+		// invariant violation: wrong meta type
+		p.reportInvariantViolation(key.Type.String()+"_meta_type", key)
+		return InstrumentConfig{}, false
+	}
+
+	return copyConfig(c), true
+}
+
 // CounterWithMeta implements Inspector.CounterWithMeta for BasicProvider.
 // It acquires the per-key init mutex, re-checks, then reads both the instance
 // and metadata before unlocking in order to provide a consistent snapshot.
@@ -208,24 +226,16 @@ func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig,
 		return nil, InstrumentConfig{}, false
 	}
 
-	m, ok3 := p.meta.Load(key)
-	if !ok3 {
-		// invariant violation: instrument without meta
-		p.reportInvariantViolation("counter_meta_missing", key)
-		return inst, InstrumentConfig{}, false
-	}
+	c, okOverall := p.getInstrumentMeta(key)
 
-	c, ok4 := m.(InstrumentConfig)
-	if !ok4 {
-		// invariant violation: wrong meta type
-		p.reportInvariantViolation("counter_meta_type", key)
-		return inst, InstrumentConfig{}, false
-	}
-
-	return inst, copyConfig(c), true
+	return inst, c, okOverall
 }
 
 // UpDownCounterWithMeta implements Inspector.UpDownCounterWithMeta for BasicProvider.
+// It acquires the per-key init mutex, re-checks, then reads both the instance
+// and metadata before unlocking in order to provide a consistent snapshot.
+// The third return value is true if and only if both the instrument and the meta were found and both valid.
+// Invariant violations (e.g., instrument exists but meta missing) are reported via logger.
 func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, InstrumentConfig, bool) {
 	key := NewInstrumentKey(InstrumentTypeUpDown, name)
 	km := p.keyMu(key)
@@ -234,20 +244,27 @@ func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, Instr
 
 	v, ok := p.updowns.Load(name)
 	if !ok {
+		// not created
 		return nil, InstrumentConfig{}, false
 	}
-	inst := v.(*BasicUpDownCounter)
 
-	var cfg InstrumentConfig
-	if m, ok := p.meta.Load(key); ok {
-		if c, ok2 := m.(InstrumentConfig); ok2 {
-			cfg = copyConfig(c)
-		}
+	inst, ok2 := v.(*BasicUpDownCounter)
+	if !ok2 {
+		// invariant violation: wrong type in map
+		p.reportInvariantViolation("updown_type", key)
+		return nil, InstrumentConfig{}, false
 	}
-	return inst, cfg, true
+
+	c, okOverall := p.getInstrumentMeta(key)
+
+	return inst, c, okOverall
 }
 
 // HistogramWithMeta implements Inspector.HistogramWithMeta for BasicProvider.
+// It acquires the per-key init mutex, re-checks, then reads both the instance
+// and metadata before unlocking in order to provide a consistent snapshot.
+// The third return value is true if and only if both the instrument and the meta were found and both valid.
+// Invariant violations (e.g., instrument exists but meta missing) are reported via logger.
 func (p *BasicProvider) HistogramWithMeta(name string) (Histogram, InstrumentConfig, bool) {
 	key := NewInstrumentKey(InstrumentTypeHistogram, name)
 	km := p.keyMu(key)
@@ -256,17 +273,20 @@ func (p *BasicProvider) HistogramWithMeta(name string) (Histogram, InstrumentCon
 
 	v, ok := p.histograms.Load(name)
 	if !ok {
+		// not created
 		return nil, InstrumentConfig{}, false
 	}
-	inst := v.(*BasicHistogram)
 
-	var cfg InstrumentConfig
-	if m, ok := p.meta.Load(key); ok {
-		if c, ok2 := m.(InstrumentConfig); ok2 {
-			cfg = copyConfig(c)
-		}
+	inst, ok2 := v.(*BasicHistogram)
+	if !ok2 {
+		// invariant violation: wrong type in map
+		p.reportInvariantViolation("histogram_type", key)
+		return nil, InstrumentConfig{}, false
 	}
-	return inst, cfg, true
+
+	c, okOverall := p.getInstrumentMeta(key)
+
+	return inst, c, okOverall
 }
 
 // ListMetadata returns a best-effort snapshot of metadata entries. It does not
@@ -363,10 +383,10 @@ func (h *BasicHistogram) Snapshot() HistSnapshot {
 }
 
 // reportInvariantViolation reports unexpected internal states such as
-// "instrument exists but meta missing". In release builds it logs once per key;
+// "instrument exists but meta missing". In release builds it logs up to 10 times per key;
 // in debug builds (or under race detector) it panics to catch bugs early.
 func (p *BasicProvider) reportInvariantViolation(kind string, key InstrumentKey) {
-	// Optional: avoid spamming logs for the same key
+	// Avoid spamming logs for the same key
 	const maxReports = 10
 	var count int32
 	if v, ok := p.meta.Load(InstrumentKey{Type: InstrumentTypeCounter, Name: "__invariant_counter__"}); ok {
@@ -398,8 +418,3 @@ func (p *BasicProvider) reportInvariantViolation(kind string, key InstrumentKey)
 func isDebugBuild() bool {
 	return raceBuild || debugBuild
 }
-
-var (
-	raceBuild  = false // replaced by race detector build flag
-	debugBuild = false // replaced by debug build tag
-)

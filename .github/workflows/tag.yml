@@ -1,0 +1,34 @@
+name: build
+on:
+  push:
+    tags:
+      - 'v*'        # run on any tag starting with 'v' (e.g., v1, v1.2.3, v2.0.0-rc1)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup Go
+        uses: actions/setup-go@v6.0.0
+        with:
+          go-version: stable
+      - name: Dependencies
+        run: go mod tidy
+      - name: lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          args: --timeout=10m
+      - name: test
+        run: make test-cov
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: .tests/coverage.html
+      - name: Upload results to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

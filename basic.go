@@ -15,9 +15,9 @@ type BasicProvider struct {
 	counters   sync.Map // map[string]*BasicCounter
 	updowns    sync.Map // map[string]*BasicUpDownCounter
 	histograms sync.Map // map[string]*BasicHistogram
-	meta       sync.Map // map[string]InstrumentConfig — use sync.Map for concurrent access
+	meta       sync.Map // map[InstrumentKey]InstrumentConfig
 	// per-key init mutexes: protect concurrent initialization for the same key
-	inits sync.Map // map[string]*sync.Mutex
+	inits sync.Map // map[InstrumentKey]*sync.Mutex
 }
 
 type basicProviderConfig struct {
@@ -51,7 +51,7 @@ func NewBasicProvider(opts ...BasicProviderOption) *BasicProvider {
 
 // keyMu returns a per-key mutex for the given key, creating one if necessary.
 // The returned mutex is owned by the provider and should be locked/unlocked by callers.
-func (p *BasicProvider) keyMu(key string) *sync.Mutex {
+func (p *BasicProvider) keyMu(key InstrumentKey) *sync.Mutex {
 	m, _ := p.inits.LoadOrStore(key, &sync.Mutex{})
 	return m.(*sync.Mutex)
 }
@@ -67,19 +67,19 @@ func applyOptions(opts []InstrumentOption) InstrumentConfig {
 	return cfg
 }
 
-// get retrieves an existing instrument by type and name.
-func (p *BasicProvider) get(t InstrumentType, name string) (interface{}, bool) {
-	switch t {
+// get retrieves an existing instrument by key.
+func (p *BasicProvider) get(key InstrumentKey) (interface{}, bool) {
+	switch key.Type {
 	case InstrumentTypeCounter:
-		if v, ok := p.counters.Load(name); ok {
+		if v, ok := p.counters.Load(key.Name); ok {
 			return v.(*BasicCounter), true
 		}
 	case InstrumentTypeUpDown:
-		if v, ok := p.updowns.Load(name); ok {
+		if v, ok := p.updowns.Load(key.Name); ok {
 			return v.(*BasicUpDownCounter), true
 		}
 	case InstrumentTypeHistogram:
-		if v, ok := p.histograms.Load(name); ok {
+		if v, ok := p.histograms.Load(key.Name); ok {
 			return v.(*BasicHistogram), true
 		}
 	}
@@ -87,19 +87,19 @@ func (p *BasicProvider) get(t InstrumentType, name string) (interface{}, bool) {
 }
 
 // create constructs and stores a new instance into the appropriate sync.Map.
-func (p *BasicProvider) create(t InstrumentType, name string) interface{} {
-	switch t {
+func (p *BasicProvider) create(key InstrumentKey) interface{} {
+	switch key.Type {
 	case InstrumentTypeCounter:
 		c := &BasicCounter{}
-		p.counters.Store(name, c)
+		p.counters.Store(key.Name, c)
 		return c
 	case InstrumentTypeUpDown:
 		u := &BasicUpDownCounter{}
-		p.updowns.Store(name, u)
+		p.updowns.Store(key.Name, u)
 		return u
 	case InstrumentTypeHistogram:
 		h := &BasicHistogram{min: math.Inf(1), max: math.Inf(-1)}
-		p.histograms.Store(name, h)
+		p.histograms.Store(key.Name, h)
 		return h
 	default:
 		return nil
@@ -108,44 +108,47 @@ func (p *BasicProvider) create(t InstrumentType, name string) interface{} {
 
 // Counter returns a monotonic counter instrument for the given name (created once).
 func (p *BasicProvider) Counter(name string, opts ...InstrumentOption) Counter {
-	return p.getOrCreate(InstrumentTypeCounter, name, opts).(*BasicCounter)
+	key := NewInstrumentKey(InstrumentTypeCounter, name)
+	return p.getOrCreate(key, opts).(*BasicCounter)
 }
 
 // UpDownCounter returns an up/down counter instrument for the given name (created once).
 func (p *BasicProvider) UpDownCounter(name string, opts ...InstrumentOption) UpDownCounter {
-	return p.getOrCreate(InstrumentTypeUpDown, name, opts).(*BasicUpDownCounter)
+	key := NewInstrumentKey(InstrumentTypeUpDown, name)
+	return p.getOrCreate(key, opts).(*BasicUpDownCounter)
 }
 
 // Histogram returns a histogram instrument for the given name (created once).
 func (p *BasicProvider) Histogram(name string, opts ...InstrumentOption) Histogram {
-	return p.getOrCreate(InstrumentTypeHistogram, name, opts).(*BasicHistogram)
+	key := NewInstrumentKey(InstrumentTypeHistogram, name)
+	return p.getOrCreate(key, opts).(*BasicHistogram)
 }
 
 // getOrCreate is a helper that implements a fast read path, computes options before
 // acquiring locks, and uses a per-key mutex to deduplicate concurrent initializations.
 //   - key is a compound "typ:name" key used for both the per-key mutex and meta storage.
 //   - opts are the instrument options (passed to applyOptions).
-func (p *BasicProvider) getOrCreate(t InstrumentType, name string, opts []InstrumentOption) interface{} {
+func (p *BasicProvider) getOrCreate(key InstrumentKey, opts []InstrumentOption) interface{} {
 	// fast read path using sync.Map loads (safe without a global lock)
-	if v, ok := p.get(t, name); ok {
+	if v, ok := p.get(key); ok {
 		return v
 	}
 
 	// compute config off-lock to avoid holding per-key mutex during option application
 	cfg := applyOptions(opts)
 
-	key := string(t) + ":" + name
+	// acquire per-key mutex to deduplicate concurrent initializations
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
 
 	// re-check after acquiring per-key mutex
-	if v, ok := p.get(t, name); ok {
+	if v, ok := p.get(key); ok {
 		return v
 	}
 	// store metadata computed earlier using the compound key typ:name
 	p.meta.Store(key, cfg)
-	inst := p.create(t, name)
+	inst := p.create(key)
 	// optional cleanup: remove the per-key mutex from the inits map to allow GC of mutexes
 	// It's safe to delete while holding the mutex; existing goroutines that already
 	// hold the pointer will continue to use it, and new callers will get a new mutex.
@@ -171,7 +174,7 @@ func copyConfig(in InstrumentConfig) InstrumentConfig {
 // It acquires the per-key init mutex, re-checks, then reads both the instance
 // and metadata before unlocking in order to provide a consistent snapshot.
 func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig, bool) {
-	key := InstrumentTypeCounter.String() + ":" + name
+	key := NewInstrumentKey(InstrumentTypeCounter, name)
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
@@ -194,7 +197,7 @@ func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig,
 
 // UpDownCounterWithMeta implements Inspector.UpDownCounterWithMeta for BasicProvider.
 func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, InstrumentConfig, bool) {
-	key := InstrumentTypeUpDown.String() + ":" + name
+	key := NewInstrumentKey(InstrumentTypeUpDown, name)
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
@@ -216,7 +219,7 @@ func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, Instr
 
 // HistogramWithMeta implements Inspector.HistogramWithMeta for BasicProvider.
 func (p *BasicProvider) HistogramWithMeta(name string) (Histogram, InstrumentConfig, bool) {
-	key := InstrumentTypeHistogram.String() + ":" + name
+	key := NewInstrumentKey(InstrumentTypeHistogram, name)
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
@@ -242,25 +245,13 @@ func (p *BasicProvider) HistogramWithMeta(name string) (Histogram, InstrumentCon
 func (p *BasicProvider) ListMetadata() []InstrumentEntry {
 	out := make([]InstrumentEntry, 0)
 	p.meta.Range(func(k, v interface{}) bool {
-		ks, ok := k.(string)
-		if !ok {
-			return true
+		key, ok := k.(InstrumentKey)
+		cfg, ok2 := v.(InstrumentConfig)
+		if !ok || !ok2 {
+			return true // skip invalid entries
 		}
-		// expect "type:name"; find ':' without importing strings
-		idx := -1
-		for i, r := range ks {
-			if r == ':' {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			return true
-		}
-		typ := InstrumentType(ks[:idx])
-		name := ks[idx+1:]
-		cfg, _ := v.(InstrumentConfig)
-		out = append(out, InstrumentEntry{Type: typ, Name: name, Config: copyConfig(cfg)})
+
+		out = append(out, InstrumentEntry{Type: key.Type, Name: key.Name, Config: copyConfig(cfg)})
 		return true
 	})
 	return out

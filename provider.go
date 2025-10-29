@@ -12,6 +12,7 @@ type Provider interface {
 	Histogram(name string, opts ...InstrumentOption) Histogram
 }
 
+// InstrumentType represents the type of instrument.
 type InstrumentType string
 
 func (i InstrumentType) String() string {
@@ -23,6 +24,21 @@ const (
 	InstrumentTypeUpDown    InstrumentType = "updown"
 	InstrumentTypeHistogram InstrumentType = "histogram"
 )
+
+// InstrumentKey uniquely identifies an instrument by its type and name.
+type InstrumentKey struct {
+	Type InstrumentType
+	Name string
+}
+
+func NewInstrumentKey(itype InstrumentType, name string) InstrumentKey {
+	return InstrumentKey{Type: itype, Name: name}
+}
+
+// String returns a string representation of the InstrumentKey.
+func (k InstrumentKey) String() string {
+	return k.Type.String() + ":" + k.Name
+}
 
 // Counter records monotonic counts.
 // Methods must be safe for concurrent use.

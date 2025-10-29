@@ -14,7 +14,7 @@ func TestInitsCleanupEnabled(t *testing.T) {
 func TestInitsCleanupDisabled(t *testing.T) {
 	p := NewBasicProvider(WithInitCleanupDisabled())
 	p.Counter("cleanup_disabled")
-	key := InstrumentTypeCounter.String() + ":" + "cleanup_disabled"
+	key := NewInstrumentKey(InstrumentTypeCounter, "cleanup_disabled")
 	v, ok := p.inits.Load(key)
 	if !ok || v == nil {
 		t.Fatalf("expected inits entry to be present when cleanup disabled")

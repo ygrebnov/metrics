@@ -14,6 +14,10 @@ type Provider interface {
 
 type InstrumentType string
 
+func (i InstrumentType) String() string {
+	return string(i)
+}
+
 const (
 	InstrumentTypeCounter   InstrumentType = "counter"
 	InstrumentTypeUpDown    InstrumentType = "updown"

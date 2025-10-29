@@ -171,7 +171,7 @@ func copyConfig(in InstrumentConfig) InstrumentConfig {
 // It acquires the per-key init mutex, re-checks, then reads both the instance
 // and metadata before unlocking in order to provide a consistent snapshot.
 func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig, bool) {
-	key := string(InstrumentTypeCounter) + ":" + name
+	key := InstrumentTypeCounter.String() + ":" + name
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
@@ -194,7 +194,7 @@ func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig,
 
 // UpDownCounterWithMeta implements Inspector.UpDownCounterWithMeta for BasicProvider.
 func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, InstrumentConfig, bool) {
-	key := string(InstrumentTypeUpDown) + ":" + name
+	key := InstrumentTypeUpDown.String() + ":" + name
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()
@@ -216,7 +216,7 @@ func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, Instr
 
 // HistogramWithMeta implements Inspector.HistogramWithMeta for BasicProvider.
 func (p *BasicProvider) HistogramWithMeta(name string) (Histogram, InstrumentConfig, bool) {
-	key := string(InstrumentTypeHistogram) + ":" + name
+	key := InstrumentTypeHistogram.String() + ":" + name
 	km := p.keyMu(key)
 	km.Lock()
 	defer km.Unlock()

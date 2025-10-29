@@ -155,6 +155,117 @@ func (p *BasicProvider) getOrCreate(t InstrumentType, name string, opts []Instru
 	return inst
 }
 
+// copyConfig makes a defensive copy of InstrumentConfig (copies Attributes map).
+func copyConfig(in InstrumentConfig) InstrumentConfig {
+	out := InstrumentConfig{Description: in.Description, Unit: in.Unit}
+	if len(in.Attributes) > 0 {
+		out.Attributes = make(map[string]string, len(in.Attributes))
+		for k, v := range in.Attributes {
+			out.Attributes[k] = v
+		}
+	}
+	return out
+}
+
+// CounterWithMeta implements Inspector.CounterWithMeta for BasicProvider.
+// It acquires the per-key init mutex, re-checks, then reads both the instance
+// and metadata before unlocking in order to provide a consistent snapshot.
+func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig, bool) {
+	key := string(InstrumentTypeCounter) + ":" + name
+	km := p.keyMu(key)
+	km.Lock()
+	defer km.Unlock()
+
+	v, ok := p.counters.Load(name)
+	if !ok {
+		// not created
+		return nil, InstrumentConfig{}, false
+	}
+	inst := v.(*BasicCounter)
+
+	var cfg InstrumentConfig
+	if m, ok := p.meta.Load(key); ok {
+		if c, ok2 := m.(InstrumentConfig); ok2 {
+			cfg = copyConfig(c)
+		}
+	}
+	return inst, cfg, true
+}
+
+// UpDownCounterWithMeta implements Inspector.UpDownCounterWithMeta for BasicProvider.
+func (p *BasicProvider) UpDownCounterWithMeta(name string) (UpDownCounter, InstrumentConfig, bool) {
+	key := string(InstrumentTypeUpDown) + ":" + name
+	km := p.keyMu(key)
+	km.Lock()
+	defer km.Unlock()
+
+	v, ok := p.updowns.Load(name)
+	if !ok {
+		return nil, InstrumentConfig{}, false
+	}
+	inst := v.(*BasicUpDownCounter)
+
+	var cfg InstrumentConfig
+	if m, ok := p.meta.Load(key); ok {
+		if c, ok2 := m.(InstrumentConfig); ok2 {
+			cfg = copyConfig(c)
+		}
+	}
+	return inst, cfg, true
+}
+
+// HistogramWithMeta implements Inspector.HistogramWithMeta for BasicProvider.
+func (p *BasicProvider) HistogramWithMeta(name string) (Histogram, InstrumentConfig, bool) {
+	key := string(InstrumentTypeHistogram) + ":" + name
+	km := p.keyMu(key)
+	km.Lock()
+	defer km.Unlock()
+
+	v, ok := p.histograms.Load(name)
+	if !ok {
+		return nil, InstrumentConfig{}, false
+	}
+	inst := v.(*BasicHistogram)
+
+	var cfg InstrumentConfig
+	if m, ok := p.meta.Load(key); ok {
+		if c, ok2 := m.(InstrumentConfig); ok2 {
+			cfg = copyConfig(c)
+		}
+	}
+	return inst, cfg, true
+}
+
+// ListMetadata returns a best-effort snapshot of metadata entries. It does not
+// acquire per-key init mutexes for each entry; callers should treat the result
+// as a point-in-time snapshot that may race with concurrent creations.
+func (p *BasicProvider) ListMetadata() []InstrumentEntry {
+	out := make([]InstrumentEntry, 0)
+	p.meta.Range(func(k, v interface{}) bool {
+		ks, ok := k.(string)
+		if !ok {
+			return true
+		}
+		// expect "type:name"; find ':' without importing strings
+		idx := -1
+		for i, r := range ks {
+			if r == ':' {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return true
+		}
+		typ := InstrumentType(ks[:idx])
+		name := ks[idx+1:]
+		cfg, _ := v.(InstrumentConfig)
+		out = append(out, InstrumentEntry{Type: typ, Name: name, Config: copyConfig(cfg)})
+		return true
+	})
+	return out
+}
+
 // BasicCounter is a thread-safe monotonic counter.
 type BasicCounter struct {
 	val atomic.Int64

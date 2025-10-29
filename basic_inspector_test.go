@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -222,5 +223,117 @@ func TestListMetadata_TableDriven(t *testing.T) {
 	}
 	if cfgC.Unit != u1 {
 		t.Fatalf("provider metadata mutated via ListMetadata copy: got %v", cfgC)
+	}
+}
+
+func TestConcurrentCreationAndInitCleanup(t *testing.T) {
+	// Default provider: init cleanup enabled -> per-key mutex should be deleted after create
+	p := NewBasicProvider()
+	name := "race_counter"
+	var wg sync.WaitGroup
+	const goroutines = 50
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			c := p.Counter(name)
+			c.Add(1)
+		}()
+	}
+	wg.Wait()
+
+	// Instrument must exist and meta must be present
+	if v, ok := p.counters.Load(name); !ok || v == nil {
+		t.Fatalf("expected instrument created in counters map; got ok=%v v=%v", ok, v)
+	}
+	key := NewInstrumentKey(InstrumentTypeCounter, name)
+	if _, ok := p.meta.Load(key); !ok {
+		t.Fatalf("expected meta stored for instrument; missing")
+	}
+
+	// per-key mutex should have been removed from inits map (cleanup enabled by default)
+	if _, ok := p.inits.Load(key); ok {
+		t.Fatalf("expected per-key mutex to be cleaned up, but found one in inits map")
+	}
+
+	// Now with cleanup disabled: mutex should remain
+	p2 := NewBasicProvider(WithInitCleanupDisabled())
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			c := p2.Counter(name + "2")
+			c.Add(1)
+		}()
+	}
+	wg.Wait()
+	key2 := NewInstrumentKey(InstrumentTypeCounter, name+"2")
+	// ensure instrument/meta created without calling keyMu (avoid creating a mutex)
+	if v, ok := p2.counters.Load(name + "2"); !ok || v == nil {
+		t.Fatalf("expected instrument created in counters map for p2; got ok=%v v=%v", ok, v)
+	}
+	if _, ok := p2.meta.Load(key2); !ok {
+		t.Fatalf("expected meta stored for instrument p2; missing")
+	}
+	if v, ok := p2.inits.Load(key2); !ok {
+		t.Fatalf("expected per-key mutex entry to remain when cleanup disabled")
+	} else {
+		if _, ok2 := v.(*sync.Mutex); !ok2 {
+			t.Fatalf("unexpected type in inits map: %T", v)
+		}
+	}
+}
+
+func TestInvalidMapEntriesAndInvariantBehavior(t *testing.T) {
+	p := NewBasicProvider()
+
+	// Case 1: instrument exists but meta missing -> should return inst, ok=false
+	p.counters.Store("onlyinst", &BasicCounter{})
+	inst, cfg, ok := p.CounterWithMeta("onlyinst")
+	if inst == nil {
+		t.Fatalf("expected instance returned even when meta missing")
+	}
+	if ok {
+		t.Fatalf("expected ok==false when meta missing; got true; cfg=%v", cfg)
+	}
+
+	// Case 2: wrong type stored in counters map -> should report invariant and return not found
+	p2 := NewBasicProvider()
+	p2.counters.Store("bad", "not-a-counter")
+	p2.meta.Store(NewInstrumentKey(InstrumentTypeCounter, "bad"), InstrumentConfig{})
+	inst2, _, ok2 := p2.CounterWithMeta("bad")
+	if inst2 != nil || ok2 {
+		t.Fatalf("expected nil,false when wrong type in counters map; got %v,%v", inst2, ok2)
+	}
+
+	// Case 3: wrong type in meta map -> getInstrumentMeta should report invariant and return false
+	p3 := NewBasicProvider()
+	p3.counters.Store("badmeta", &BasicCounter{})
+	p3.meta.Store(NewInstrumentKey(InstrumentTypeCounter, "badmeta"), "not-a-config")
+	inst3, cfg3, ok3 := p3.CounterWithMeta("badmeta")
+	if inst3 == nil {
+		t.Fatalf("expected instance returned even when meta has wrong type")
+	}
+	if ok3 {
+		t.Fatalf("expected ok==false when meta type invalid; got true; cfg=%v", cfg3)
+	}
+
+	// Case 4: ListMetadata should skip invalid entries
+	p4 := NewBasicProvider()
+	p4.meta.Store("not-a-key", InstrumentConfig{})
+	p4.meta.Store(NewInstrumentKey(InstrumentTypeCounter, "good"), InstrumentConfig{Unit: "u"})
+	entries := p4.ListMetadata()
+	// only the valid entry should be present
+	found := 0
+	for _, e := range entries {
+		if e.Name == "good" && e.Type == InstrumentTypeCounter && e.Config.Unit == "u" {
+			found++
+		}
+		if e.Name == "not-a-key" {
+			t.Fatalf("invalid meta entry should have been skipped: %v", e)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("expected 1 valid metadata entry; got %d", found)
 	}
 }

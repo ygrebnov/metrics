@@ -13,6 +13,11 @@ lint: install-golangci-lint
 test:
 	@echo "Running tests..."
 	@go clean -testcache
+	@go test ./... -count=1 -timeout=600s
+
+test-debug:
+	@echo "Running tests with debug..."
+	@go clean -testcache
 	@go test ./... -count=1 -timeout=600s -tags=debug
 
 # Run tests with coverage and produce function/HTML reports.
@@ -32,4 +37,4 @@ test-race:
 	@go clean -testcache
 	@go test ./... -race -count=1 -timeout=600s
 
-.PHONY: lint test test-cov test-race
+.PHONY: lint test test-debug test-cov test-race

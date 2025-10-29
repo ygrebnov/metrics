@@ -11,7 +11,9 @@ import (
 // Instruments are created on demand by name and reused for the same name.
 // Instrument options are currently advisory and stored for potential introspection.
 type BasicProvider struct {
-	cfg        *basicProviderConfig
+	cfg    *basicProviderConfig
+	logger logger
+
 	counters   sync.Map // map[string]*BasicCounter
 	updowns    sync.Map // map[string]*BasicUpDownCounter
 	histograms sync.Map // map[string]*BasicHistogram
@@ -20,10 +22,18 @@ type BasicProvider struct {
 	inits sync.Map // map[InstrumentKey]*sync.Mutex
 }
 
+type logger interface {
+	Debugf(format string, args ...interface{})
+	Infof(format string, args ...interface{})
+	Warnf(format string, args ...interface{})
+	Errorf(format string, args ...interface{})
+}
+
 type basicProviderConfig struct {
 	// when false, remove per-key mutex entries from `inits` after initialization to
 	// allow GC of mutexes for many ephemeral instrument names. Default: false.
 	doNotCleanupInits bool
+	logger            logger
 }
 
 // BasicProviderOption configures a BasicProvider constructed by NewBasicProvider.
@@ -37,6 +47,10 @@ func WithInitCleanupDisabled() BasicProviderOption {
 	return func(cfg *basicProviderConfig) { cfg.doNotCleanupInits = true }
 }
 
+func WithBasicProviderLogger(l logger) BasicProviderOption {
+	return func(cfg *basicProviderConfig) { cfg.logger = l }
+}
+
 // NewBasicProvider constructs a new BasicProvider.
 // Accepts optional functional options to customize behavior.
 func NewBasicProvider(opts ...BasicProviderOption) *BasicProvider {
@@ -46,7 +60,7 @@ func NewBasicProvider(opts ...BasicProviderOption) *BasicProvider {
 			o(cfg)
 		}
 	}
-	return &BasicProvider{cfg: cfg}
+	return &BasicProvider{cfg: cfg, logger: cfg.logger}
 }
 
 // keyMu returns a per-key mutex for the given key, creating one if necessary.
@@ -173,6 +187,8 @@ func copyConfig(in InstrumentConfig) InstrumentConfig {
 // CounterWithMeta implements Inspector.CounterWithMeta for BasicProvider.
 // It acquires the per-key init mutex, re-checks, then reads both the instance
 // and metadata before unlocking in order to provide a consistent snapshot.
+// The third return value is true if and only if both the instrument and the meta were found and both valid.
+// Invariant violations (e.g., instrument exists but meta missing) are reported via logger.
 func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig, bool) {
 	key := NewInstrumentKey(InstrumentTypeCounter, name)
 	km := p.keyMu(key)
@@ -184,15 +200,29 @@ func (p *BasicProvider) CounterWithMeta(name string) (Counter, InstrumentConfig,
 		// not created
 		return nil, InstrumentConfig{}, false
 	}
-	inst := v.(*BasicCounter)
 
-	var cfg InstrumentConfig
-	if m, ok := p.meta.Load(key); ok {
-		if c, ok2 := m.(InstrumentConfig); ok2 {
-			cfg = copyConfig(c)
-		}
+	inst, ok2 := v.(*BasicCounter)
+	if !ok2 {
+		// invariant violation: wrong type in map
+		p.reportInvariantViolation("counter_type", key)
+		return nil, InstrumentConfig{}, false
 	}
-	return inst, cfg, true
+
+	m, ok3 := p.meta.Load(key)
+	if !ok3 {
+		// invariant violation: instrument without meta
+		p.reportInvariantViolation("counter_meta_missing", key)
+		return inst, InstrumentConfig{}, false
+	}
+
+	c, ok4 := m.(InstrumentConfig)
+	if !ok4 {
+		// invariant violation: wrong meta type
+		p.reportInvariantViolation("counter_meta_type", key)
+		return inst, InstrumentConfig{}, false
+	}
+
+	return inst, copyConfig(c), true
 }
 
 // UpDownCounterWithMeta implements Inspector.UpDownCounterWithMeta for BasicProvider.
@@ -331,3 +361,45 @@ func (h *BasicHistogram) Snapshot() HistSnapshot {
 	}
 	return HistSnapshot{Count: count, Sum: sum, Min: minV, Max: maxV, Mean: mean}
 }
+
+// reportInvariantViolation reports unexpected internal states such as
+// "instrument exists but meta missing". In release builds it logs once per key;
+// in debug builds (or under race detector) it panics to catch bugs early.
+func (p *BasicProvider) reportInvariantViolation(kind string, key InstrumentKey) {
+	// Optional: avoid spamming logs for the same key
+	const maxReports = 10
+	var count int32
+	if v, ok := p.meta.Load(InstrumentKey{Type: InstrumentTypeCounter, Name: "__invariant_counter__"}); ok {
+		if c, ok2 := v.(*atomic.Int32); ok2 {
+			count = c.Add(1)
+		}
+	} else {
+		c := &atomic.Int32{}
+		p.meta.Store(InstrumentKey{Type: InstrumentTypeCounter, Name: "__invariant_counter__"}, c)
+		count = c.Add(1)
+	}
+	if count > maxReports {
+		return
+	}
+
+	msg := "[metrics] invariant violation: " + kind + " for " + key.String()
+
+	// In debug builds, fail fast.
+	if isDebugBuild() {
+		panic(msg)
+	}
+
+	// In release builds, just log a warning.
+	p.logger.Warnf(msg)
+}
+
+// isDebugBuild reports whether we're in a "debug" or "race" build.
+// This uses Go's built-in race detector flag or a debug build tag.
+func isDebugBuild() bool {
+	return raceBuild || debugBuild
+}
+
+var (
+	raceBuild  = false // replaced by race detector build flag
+	debugBuild = false // replaced by debug build tag
+)

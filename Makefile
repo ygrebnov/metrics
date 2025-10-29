@@ -13,7 +13,7 @@ lint: install-golangci-lint
 test:
 	@echo "Running tests..."
 	@go clean -testcache
-	@go test ./... -count=1 -timeout=600s
+	@go test ./... -count=1 -timeout=600s -tags=debug
 
 # Run tests with coverage and produce function/HTML reports.
 # Some environments may include stale file paths in the coverage profile.
@@ -23,7 +23,7 @@ test-cov:
 	@go clean -testcache
 	@rm -rf $(COVERAGE_PATH)
 	@mkdir -p $(COVERAGE_PATH)
-	@go test -v -coverpkg=./... ./... -coverprofile $(COVERAGE_PATH)coverage.txt -count=1 -timeout=600s
+	@go test -v -coverpkg=./... ./... -coverprofile $(COVERAGE_PATH)coverage.txt -count=1 -timeout=600s -tags=debug
 	@go tool cover -func=$(COVERAGE_PATH)coverage.txt -o $(COVERAGE_PATH)functions.txt
 	@go tool cover -html=$(COVERAGE_PATH)coverage.txt -o $(COVERAGE_PATH)coverage.html
 
